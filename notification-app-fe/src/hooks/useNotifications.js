@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
-import { fetchNotifications } from "../apis/notifications";
+import { fetchNotifications } from "../api/notifications";
+import { Log } from "../middleware/logger";
 
 export function useNotifications() {
   const [notifications, setNotifications] = useState([]);
@@ -7,12 +8,23 @@ export function useNotifications() {
 
   useEffect(() => {
     const load = async () => {
-      const data = await fetchNotifications();
-      setNotifications(data.notifications ?? []);
+      try {
+        const data = await fetchNotifications();
+        setNotifications(data.notifications ?? []);
+        setTotal(data.total ?? 0);
+        await Log("frontend", "info", "hook", "Notifications loaded");
+      } catch (error) {
+        await Log(
+          "frontend",
+          "error",
+          "hook",
+          `Failed to load notifications: ${error.message}`,
+        );
+      }
     };
 
     load();
-  }, [notifications]);
+  }, []);
 
   const totalPages = 0;
 
