@@ -49,7 +49,7 @@ export async function Log(stack, level, packageName, message) {
         message,
       }),
     });
-  } catch {
-    console.log(error);
+  } catch (error) {
+    console.error(error);
   }
 }

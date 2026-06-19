@@ -1,4 +1,4 @@
-const LOG_URL = "http://4.224.186.213/evaluation-service/logs";
+const LOG_URL = "/evaluation-service/logs";
 
 const allowedStacks = new Set(["frontend", "backend"]);
 const allowedLevels = new Set(["debug", "info", "warn", "error", "fatal"]);
@@ -16,8 +16,7 @@ const allowedPackages = new Set([
 ]);
 
 function getAuthToken() {
-  const token  = import.meta.env.TOKEN;
-  return token;
+  return import.meta.env.VITE_TOKEN || import.meta.env.TOKEN;
 }
 
 export async function Log(stack, level, packageName, message) {
@@ -49,7 +48,7 @@ export async function Log(stack, level, packageName, message) {
         message,
       }),
     });
-  } catch {
-    console.log(error);
+  } catch (error) {
+    console.error(error);
   }
 }
