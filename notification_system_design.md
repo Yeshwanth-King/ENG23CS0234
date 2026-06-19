@@ -808,6 +808,253 @@ WHERE n.type = 'placement'
 
 The original query may work in a very simple table design, but it is not good for a large database. It should avoid `SELECT *`, use pagination, show latest notifications first, and use a proper composite index. Adding indexes on every column is not a good solution. Indexes should be added based on the queries that are actually used often.
 
+# Stage 4
+
+## Problem
+
+In this stage, notifications are fetched on every page load for every student. If many students open the app at the same time, the database will get too many requests.
+
+This can cause:
+
+- Slow page loading.
+- More database load.
+- Bad user experience.
+- Repeated fetching of the same data again and again.
+
+## Suggested Solution
+
+I would not fetch everything from the database every time. I would use a combination of caching, pagination, and real-time updates.
+
+The basic idea is:
+
+- Fetch only required notifications.
+- Cache recent notifications.
+- Use pagination.
+- Use real-time updates for new notifications.
+- Avoid calling DB again if data is already available for a short time.
+
+## Strategy 1: Pagination
+
+Instead of loading all notifications, the API should return limited records.
+
+Example:
+
+```http
+GET /api/v1/notifications?page=1&limit=10
+```
+
+This improves performance because the database and frontend only handle a small amount of data at a time.
+
+Tradeoff:
+
+- User may need to click next page to see older notifications.
+- But this is better than loading everything at once.
+
+## Strategy 2: Cache Recent Notifications
+
+Most students usually check recent notifications only. So recent notifications can be cached using Redis or in-memory cache.
+
+Example cache key:
+
+```text
+notifications:user_1042:page_1:type_all
+```
+
+The cache can expire after a short time, like 30 seconds or 1 minute.
+
+Tradeoff:
+
+- Cache gives faster response.
+- But very new data may take a few seconds to appear if cache is not updated.
+- This can be solved by clearing or updating cache when a new notification is created.
+
+## Strategy 3: Cache Unread Count
+
+Unread count is shown often in the UI badge. Calculating it again and again from DB can be costly.
+
+So we can cache unread count separately:
+
+```text
+unread_count:user_1042
+```
+
+When a new notification comes, increase the count. When a user marks notification as read, decrease the count.
+
+Tradeoff:
+
+- Faster badge display.
+- Need to keep cache and DB in sync.
+
+## Strategy 4: Real-Time Updates
+
+From Stage 1, I selected Server-Sent Events for real-time notifications.
+
+Instead of refreshing notifications again and again, frontend can:
+
+- Load notifications once when page opens.
+- Keep SSE connection open.
+- Add new notification when event comes.
+- Update unread count directly.
+
+Tradeoff:
+
+- Server has to keep connections open.
+- But it reduces repeated API calls.
+
+## Strategy 5: Use Proper Indexes
+
+The notification list API mostly filters by user, read status, type, and latest time. So indexes should be created on those fields.
+
+Example:
+
+```sql
+CREATE INDEX idx_notifications_student_read_created
+ON notifications(studentID, isRead, createdAt DESC);
+```
+
+Tradeoff:
+
+- Read queries become faster.
+- Inserts and updates become slightly slower because indexes also need to be updated.
+
+## Final Approach
+
+My final solution will be:
+
+- Use pagination for notification list.
+- Cache recent notification pages for a short time.
+- Cache unread count.
+- Use SSE for new notifications.
+- Use indexes for common queries.
+
+This reduces direct database load and still keeps the user experience good.
+
+# Stage 5
+
+## Problem
+
+The given pseudocode is:
+
+```text
+function notify_all(student_ids: array, message: string):
+    for student_id in student_ids:
+        send_email(student_id, message)
+        save_to_db(student_id, message)
+        push_to_app(student_id, message)
+```
+
+This implementation has many problems when there are `50,000` students.
+
+## Shortcomings
+
+- It processes students one by one.
+- If `send_email` fails for one student, the remaining work may stop or become unclear.
+- Email sending and DB saving are mixed in the same loop.
+- It can take too much time to complete.
+- There is no retry mechanism.
+- There is no proper tracking of success and failure.
+- If the server crashes midway, we may not know which students already got the notification.
+
+## What Happens If Email Fails For 200 Students?
+
+If `send_email` fails for 200 students midway, we should not stop the whole notification process.
+
+The system should:
+
+- Save failed email attempts.
+- Retry them later.
+- Continue processing other students.
+- Keep logs for failed students.
+- Show final status like sent, failed, retrying.
+
+Email failure should not stop in-app notification also. A student should still get the in-app notification even if email fails.
+
+## Should DB Save And Email Sending Happen Together?
+
+No, I would not do both tightly together in the same loop.
+
+First, the notification should be saved in DB because DB is the main record. After that, email sending and app push can happen separately using background jobs.
+
+This is better because:
+
+- DB record is not lost.
+- Email can be retried.
+- App push can be retried.
+- The API can respond faster.
+- Failures are easier to track.
+
+## Better Design
+
+I would split this into three parts:
+
+- Create notification record.
+- Create recipient rows for students.
+- Send email and app push using background workers.
+
+## Revised Pseudocode
+
+```text
+function notify_all(student_ids, message):
+    notification_id = save_notification(message)
+
+    for student_id in student_ids:
+        save_recipient(notification_id, student_id, status="pending")
+        add_job_to_queue("send_email", notification_id, student_id)
+        add_job_to_queue("push_to_app", notification_id, student_id)
+
+    return "notification process started"
+```
+
+Background email worker:
+
+```text
+function email_worker(job):
+    try:
+        send_email(job.student_id, job.notification_id)
+        update_email_status(job.student_id, job.notification_id, "sent")
+    catch error:
+        if job.retry_count < 3:
+            retry_job_later(job)
+        else:
+            update_email_status(job.student_id, job.notification_id, "failed")
+            log_error(job.student_id, error)
+```
+
+Background app push worker:
+
+```text
+function app_push_worker(job):
+    try:
+        push_to_app(job.student_id, job.notification_id)
+        update_push_status(job.student_id, job.notification_id, "sent")
+    catch error:
+        retry_job_later(job)
+```
+
+## Why This Is More Reliable
+
+This process is more reliable because the main notification is saved first. After that, email and app push can happen in the background.
+
+If email fails for 200 students:
+
+- Those 200 failed jobs can be retried.
+- Other students are not affected.
+- Admin can check failed status.
+- Logs can show why it failed.
+
+## Extra Improvements
+
+- Send emails in batches instead of one by one.
+- Use queue system like BullMQ, RabbitMQ, or any background job queue.
+- Keep retry count for failed jobs.
+- Store status for each student.
+- Use logs for success and failure.
+- Do not block the API until all 50,000 emails are sent.
+
+## Final Answer
+
+The original loop is too simple for 50,000 students. I would save the notification first, store recipients in DB, and then use background jobs for email and app push. Email failure should not stop DB saving or in-app notification. Failed emails should be retried and logged.
+
 # Stage 6
 
 ## Priority Inbox
